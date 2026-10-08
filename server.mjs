@@ -6,7 +6,7 @@ import fs from "fs";
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-const PORT = process.env.PROXY_PORT || 6446;
+const PORT = process.env.SERVER_PORT || process.env.PROXY_PORT || 6446;
 const OC_VERSION = "1.15.0";
 const PROXY_VERSION = "9";
 
