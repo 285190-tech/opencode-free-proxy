@@ -6,6 +6,15 @@ import fs from "fs";
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
+// ── CORS ───────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 const PORT = process.env.SERVER_PORT || process.env.PROXY_PORT || 6446;
 const OC_VERSION = "1.15.0";
 const PROXY_VERSION = "9";
@@ -210,7 +219,6 @@ function anthropicToOpenAI(body) {
         .filter(b => b.type === "text")
         .map(b => b.text)
         .join("\n");
-      // tool_use blocks → assistant tool_calls
       const toolUses = msg.content.filter(b => b.type === "tool_use");
       if (toolUses.length && msg.role === "assistant") {
         messages.push({
@@ -341,7 +349,6 @@ function pipeZenAsAnthropic(zenOpts, body, model, res, inputTokens) {
     zenRes.on("data", (chunk) => {
       const str = chunk.toString();
 
-      // Check for errors on first chunk
       if (!firstChunkHandled) {
         firstChunkHandled = true;
         const trimmed = str.trim();
@@ -380,7 +387,6 @@ function pipeZenAsAnthropic(zenOpts, body, model, res, inputTokens) {
 
         sendHeaders();
 
-        // Text content
         if (delta.content) {
           if (contentIdx === 0 && toolIdx === -1) {
             sendSSE("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
@@ -393,12 +399,10 @@ function pipeZenAsAnthropic(zenOpts, body, model, res, inputTokens) {
           outputTokens += Math.ceil(delta.content.length / 4);
         }
 
-        // Tool calls
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls) {
             const idx = tc.index ?? 0;
             if (idx > toolIdx) {
-              // Close previous text block if open
               if (toolIdx === -1 && contentIdx > 0) {
                 sendSSE("content_block_stop", { type: "content_block_stop", index: 0 });
               }
@@ -420,10 +424,8 @@ function pipeZenAsAnthropic(zenOpts, body, model, res, inputTokens) {
           }
         }
 
-        // Finish
         if (parsed.choices?.[0]?.finish_reason) {
           const fr = parsed.choices[0].finish_reason;
-          // Close open blocks
           const totalBlocks = (contentIdx > 0 ? 1 : 0) + (toolIdx >= 0 ? toolIdx + 1 : 0);
           for (let i = 0; i < totalBlocks; i++) {
             sendSSE("content_block_stop", { type: "content_block_stop", index: i });
