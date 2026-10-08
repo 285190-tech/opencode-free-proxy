@@ -2,6 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import https from "https";
 import fs from "fs";
+import { HttpsProxyAgent } from "https-proxy-agent";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -16,8 +17,15 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.SERVER_PORT || process.env.PROXY_PORT || 6446;
-const OC_VERSION = "1.18.35";
-const PROXY_VERSION = "9";
+const OC_VERSION = "1.18.30";
+const PROXY_VERSION = "10";
+
+// ── IP Forwarding (residential proxy) ──────────────────────────────
+const proxyAgent = process.env.HTTPS_PROXY
+  ? new HttpsProxyAgent(process.env.HTTPS_PROXY)
+  : undefined;
+if (proxyAgent) console.log("[INIT] Using residential proxy for outbound requests");
+else console.log("[INIT] No HTTPS_PROXY set — using direct connection");
 
 // ── API Keys ───────────────────────────────────────────────────────
 const keysFile = process.env.KEYS_FILE || "./api-keys.json";
@@ -44,19 +52,36 @@ function auth(req) {
   return null;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────
-function ocId(prefix) {
-  const ts = Date.now().toString(16);
-  const rnd = crypto.randomBytes(12).toString("base64url").slice(0, 16);
-  return `${prefix}_${ts}${rnd}`;
+// ── Corrected ID generation ────────────────────────────────────────
+// Zen requires: ses_ + 12 lowercase hex + 14 Base62 = 30 chars
+// Pattern: /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+function randomBase62(len) {
+  const bytes = crypto.randomBytes(len);
+  let out = "";
+  for (let i = 0; i < len; i++) out += BASE62[bytes[i] % 62];
+  return out;
 }
 
+function ocId(prefix) {
+  if (prefix === "ses") {
+    const hex = crypto.randomBytes(6).toString("hex"); // 12 lowercase hex
+    return `ses_${hex}${randomBase62(14)}`;
+  }
+  // msg_ prefix: 12 hex + 14 Base62
+  const tsHex = Date.now().toString(16).padStart(12, "0");
+  return `msg_${tsHex}${randomBase62(14)}`;
+}
+
+// ── Models ─────────────────────────────────────────────────────────
 const MODELS = [
-  "deepseek-v4-flash-free",
   "big-pickle",
-  "minimax-m2.5-free",
-  "nemotron-3-super-free",
-  "qwen3.6-plus-free",
+  "jev-1.13-free",
+  "exo-free",
+  "mimo-v2.6-flash-free",
+  "nemotron-3-ultra-free",
+  "ling-3.1-flash-free",
 ];
 
 // Track sessions per user (rotate every 30 min)
@@ -94,6 +119,7 @@ function zenRequest(model, messages, stream, tools, tool_choice, sessionId) {
         "x-opencode-request": requestId,
         "x-opencode-session": sessionId,
       },
+      agent: proxyAgent,
       timeout: 120000,
     },
   };
@@ -110,7 +136,7 @@ function pipeZenResponse(zenOpts, body, stream, res) {
         firstChunk = chunk;
         const str = chunk.toString().trim();
 
-        if (str.startsWith("{") && (str.includes("FreeUsageLimitError") || str.includes('"error"'))) {
+        if (str.startsWith("{") && (str.includes("FreeUsageLimitError") || str.includes("FreeTierError") || str.includes('"error"'))) {
           try {
             const parsed = JSON.parse(str);
             if (parsed.error || parsed.type === "error") {
@@ -279,7 +305,7 @@ function openAIToAnthropic(oaiResp, model, inputTokens) {
       try { input = JSON.parse(tc.function.arguments); } catch {}
       content.push({
         type: "tool_use",
-        id: tc.id || ocId("toolu"),
+        id: tc.id || ocId("msg"),
         name: tc.function.name,
         input,
       });
@@ -352,7 +378,7 @@ function pipeZenAsAnthropic(zenOpts, body, model, res, inputTokens) {
       if (!firstChunkHandled) {
         firstChunkHandled = true;
         const trimmed = str.trim();
-        if (trimmed.startsWith("{") && (trimmed.includes("FreeUsageLimitError") || trimmed.includes('"error"'))) {
+        if (trimmed.startsWith("{") && (trimmed.includes("FreeUsageLimitError") || trimmed.includes("FreeTierError") || trimmed.includes('"error"'))) {
           try {
             const parsed = JSON.parse(trimmed);
             if (parsed.error || parsed.type === "error") {
@@ -410,7 +436,7 @@ function pipeZenAsAnthropic(zenOpts, body, model, res, inputTokens) {
               const blockIdx = contentIdx > 0 ? idx + 1 : idx;
               sendSSE("content_block_start", {
                 type: "content_block_start", index: blockIdx,
-                content_block: { type: "tool_use", id: tc.id || ocId("toolu"), name: tc.function?.name || "" },
+                content_block: { type: "tool_use", id: tc.id || ocId("msg"), name: tc.function?.name || "" },
               });
             }
             if (tc.function?.arguments) {
@@ -495,7 +521,7 @@ app.post("/v1/chat/completions", (req, res) => {
 
   const sessionId = getSession(user);
   const msgSummary = (messages || []).map(m => ({ role: m.role, len: (typeof m.content === "string" ? m.content : JSON.stringify(m.content || "")).length }));
-  console.log("[OAI]", new Date().toISOString(), user, model, stream ? "stream" : "sync", "msgs:", JSON.stringify(msgSummary));
+  console.log("[OAI]", new Date().toISOString(), user, model, stream ? "stream" : "sync", "sid:", sessionId.slice(0, 20) + "...", "msgs:", JSON.stringify(msgSummary));
 
   const { body, options } = zenRequest(model, messages, stream, tools, tool_choice, sessionId);
   pipeZenResponse(options, body, stream, res);
@@ -550,7 +576,10 @@ app.post("/v1/messages", async (req, res) => {
 
 // ── Health ──────────────────────────────────────────────────────────
 app.get("/health", (_req, res) => res.json({
-  status: "ok", version: `v${PROXY_VERSION}`, models: MODELS.length,
+  status: "ok",
+  version: `v${PROXY_VERSION}`,
+  models: MODELS.length,
+  proxy: proxyAgent ? "residential" : "direct",
   endpoints: ["/v1/chat/completions", "/v1/messages", "/v1/models"],
 }));
 
@@ -562,6 +591,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("  Models:    GET  /v1/models");
   console.log("  Health:    GET  /health");
   console.log("  Models:", MODELS.join(", "));
+  console.log("  Egress:", proxyAgent ? "residential proxy" : "direct (datacenter IP)");
   for (const [name, key] of Object.entries(apiKeys)) {
     console.log(`  ${name.padEnd(15)} ${key}`);
   }
