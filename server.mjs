@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.SERVER_PORT || process.env.PROXY_PORT || 6446;
-const OC_VERSION = "1.15.0";
+const OC_VERSION = "1.18.35";
 const PROXY_VERSION = "9";
 
 // ── API Keys ───────────────────────────────────────────────────────
