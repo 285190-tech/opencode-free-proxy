@@ -20,12 +20,10 @@ const PORT = process.env.SERVER_PORT || process.env.PROXY_PORT || 6446;
 const OC_VERSION = "1.18.30";
 const PROXY_VERSION = "10";
 
-// ── IP Forwarding (residential proxy) ──────────────────────────────
-const proxyAgent = process.env.HTTPS_PROXY
-  ? new HttpsProxyAgent(process.env.HTTPS_PROXY)
-  : undefined;
-if (proxyAgent) console.log("[INIT] Using residential proxy for outbound requests");
-else console.log("[INIT] No HTTPS_PROXY set — using direct connection");
+// ── Residential proxy (IPLoop) ─────────────────────────────────────
+const PROXY_URL = "http://:iploop_1d6b55cf_e881442962c566a9628580caae75f4f1c6d58fe2@proxy.iploop.io:8880";
+const proxyAgent = new HttpsProxyAgent(new URL(PROXY_URL));
+console.log("[INIT] Using residential proxy for outbound requests");
 
 // ── API Keys ───────────────────────────────────────────────────────
 const keysFile = process.env.KEYS_FILE || "./api-keys.json";
@@ -579,7 +577,7 @@ app.get("/health", (_req, res) => res.json({
   status: "ok",
   version: `v${PROXY_VERSION}`,
   models: MODELS.length,
-  proxy: proxyAgent ? "residential" : "direct",
+  proxy: "residential",
   endpoints: ["/v1/chat/completions", "/v1/messages", "/v1/models"],
 }));
 
@@ -591,7 +589,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("  Models:    GET  /v1/models");
   console.log("  Health:    GET  /health");
   console.log("  Models:", MODELS.join(", "));
-  console.log("  Egress:", proxyAgent ? "residential proxy" : "direct (datacenter IP)");
+  console.log("  Egress: residential proxy (IPLoop)");
   for (const [name, key] of Object.entries(apiKeys)) {
     console.log(`  ${name.padEnd(15)} ${key}`);
   }
